@@ -1,7 +1,8 @@
 import numpy as np
 from scipy.integrate import solve_ivp
 import matplotlib.pyplot as plt
-from dc_motor_env import motor_dynamics
+from dc_motor_env import motor_dynamics, DCMotorEnv
+from base_controller import PIDController
 
 
 def simulate_step_response():
@@ -53,4 +54,29 @@ def run_episode(env, controller, max_steps=500, render=False):
     return total_reward, log
 
 if __name__ == "__main__":
-    simulate_step_response()
+    # simulate_step_response()
+    controllers = {
+    "PID"      : PIDController(Kp=1.2, Ki=0.5, Kd=0.01),
+}
+
+    env     = DCMotorEnv()
+    results = {}
+
+    for name, ctrl in controllers.items():
+        reward, log = run_episode(env, ctrl)
+        results[name] = log
+        print(f"{name:12s} | Total reward: {reward:.2f}")
+
+    #  plot speed tracking
+    fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+
+    for name, log in results.items():
+        t = np.arange(len(log['omega'])) * env.dt
+        axes[0].plot(t, log['omega'],   label=name)
+        axes[1].plot(t, log['actions'], label=name)
+
+    axes[0].axhline(env.target, color='k', linestyle='--', label='Setpoint')
+    axes[0].set_ylabel('Speed (RPM)'); axes[0].legend(); axes[0].set_title('Speed Tracking')
+    axes[1].set_ylabel('Action (V)');  axes[1].legend(); axes[1].set_xlabel('Time (s)')
+    plt.tight_layout()
+    plt.show()
