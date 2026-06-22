@@ -1,5 +1,5 @@
 import numpy as np
-# from scipy.integrate import solve_ivp
+from scipy.integrate import solve_ivp
 import gymnasium as gym
 from gymnasium import spaces
 
@@ -24,9 +24,17 @@ class DCMotorEnv(gym.Env):
         self.dt = 0.01
         self.state = np.zeros(2)
     def step(self, action):
-        pass
+        sol = solve_ivp(motor_dynamics, [0, self.dt], self.state, args=(action[0],))
+        self.state = sol.y[:, -1]
+        error = self.target - self.state[0]
+        reward = -error**2 - 0.01*action[0]**2  # penalize error + control effort
+        obs = np.array([error, self.state[0], self.state[1]])
+        return obs, reward, False, False, {}
+    
     def reset(self, seed=None):
-        pass
+        self.state = np.zeros(2)
+        self.target = np.random.uniform(50, 150)  # random target speed
+        return np.array([self.target, 0, 0]), {}
     def render(self, mode='human'):
         pass
 
