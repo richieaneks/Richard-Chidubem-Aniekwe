@@ -1,5 +1,7 @@
 import numpy as np
 from scipy.integrate import solve_ivp
+import gymnasium as gym
+from gymnasium import spaces
 
 # Motor parameters (typical small DC motor)
 J = 0.01    # rotor inertia (kg.m^2)
@@ -14,8 +16,6 @@ def motor_dynamics(t, x, V, load_torque=0):
     di = (V - K*omega - R*i) / L
     return [domega, di]
 
-import gymnasium as gym
-from gymnasium import spaces
 
 class DCMotorEnv(gym.Env):
     def __init__(self):
