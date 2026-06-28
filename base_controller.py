@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 import numpy as np
 from simple_pid import PID
+import control as ct
 
 class BaseController(ABC):
     """All controllers share this interface"""
@@ -32,3 +33,22 @@ class PIDController(BaseController):
 
     def reset(self):
         self.pid.reset()
+
+class LQRController(BaseController):
+    def __init__(self, A, B, Q, R_lqr, output_limits=(-12, 12)):
+        self.K, _, _ = ct.lqr(A, B, Q, R_lqr)
+        self.output_limits = output_limits
+        self.target = 0.0
+
+    def compute(self, obs):
+        # obs = [error, omega, current]  — use full state [omega, current]
+        omega, current = obs[1], obs[2]
+        x = np.array([[omega - self.target], [current]])
+        u = -self.K @ x
+        return float(np.clip(u, *self.output_limits))
+
+    def set_target(self, target):
+        self.target = target
+
+    def reset(self):
+        pass
