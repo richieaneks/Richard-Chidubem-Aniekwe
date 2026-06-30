@@ -2,7 +2,8 @@ import numpy as np
 from scipy.integrate import solve_ivp
 import matplotlib.pyplot as plt
 from dc_motor_env import motor_dynamics, DCMotorEnv
-from base_controller import PIDController
+from base_controller import PIDController, LQRController
+import control as ct
 
 
 def simulate_step_response():
@@ -55,11 +56,31 @@ def run_episode(env, controller, max_steps=500, render=False):
 
 if __name__ == "__main__":
     # simulate_step_response()
+    env     = DCMotorEnv()
+    # PID parameters
+    Kp = 1.2
+    Ki = 0.5
+    Kd = 0.01
+    # Motor parameters
+    J, b, K, R, L = env.J, env.b, env.K, env.R, env.L
+
+    # LQR parameters
+    Q = np.diag([10,1])
+    R_lqr=[[0.1]]
+
+    s = ct.TransferFunction.s
+    G = K / ((J*s + b)*(L*s + R) + K**2)
+    t, y = ct.step_response(G)
+
+    # LQR
+    A, B, C, D = ct.ssdata(ct.tf2ss(G))
+
     controllers = {
-    "PID"      : PIDController(Kp=1.2, Ki=0.5, Kd=0.01),
+    "PID"      : PIDController(Kp=Kp, Ki=Ki, Kd=Kd),
+    "LQR"      : LQRController(A, B, Q, R_lqr), # there might be need to update 
+                                                # the A & B because of domain randomization
 }
 
-    env     = DCMotorEnv()
     results = {}
 
     for name, ctrl in controllers.items():
@@ -76,7 +97,11 @@ if __name__ == "__main__":
         axes[1].plot(t, log['actions'], label=name)
 
     axes[0].axhline(env.target, color='k', linestyle='--', label='Setpoint')
-    axes[0].set_ylabel('Speed (RPM)'); axes[0].legend(); axes[0].set_title('Speed Tracking')
-    axes[1].set_ylabel('Action (V)');  axes[1].legend(); axes[1].set_xlabel('Time (s)')
+    axes[0].set_ylabel('Speed (RPM)')
+    axes[0].legend()
+    axes[0].set_title('Speed Tracking')
+    axes[1].set_ylabel('Action (V)')
+    axes[1].legend()
+    axes[1].set_xlabel('Time (s)')
     plt.tight_layout()
     plt.show()
