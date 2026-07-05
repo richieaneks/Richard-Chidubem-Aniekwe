@@ -117,7 +117,7 @@ def plot_results(results: dict, env: DCMotorEnv):
 
 #  Entry point 
 if __name__ == "__main__":
-    os.mkdir("outputs", exist_ok=True)
+    os.makedirs("outputs", exist_ok=True)  # Create outputs dir if it doesn't exist
 
     # Open-loop step response (nominal plant)
     simulate_step_response()
