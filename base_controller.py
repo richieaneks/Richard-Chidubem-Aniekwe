@@ -83,11 +83,12 @@ class LQRController(BaseController):
     always matches the current randomised plant.
     """
     def __init__(self, params: dict, Q, R_lqr,
-                 output_limits=(-12.0, 12.0)):
+                 output_limits=(-12.0, 12.0), dt=0.01):
         self.Q   = np.asarray(Q,     dtype=float)
         self.R_lqr = np.asarray(R_lqr, dtype=float)
         self.output_limits = output_limits
         self.target = 0.0
+        self.dt = float(dt)
         self._compute_gain(params)
 
     @staticmethod
@@ -109,12 +110,16 @@ class LQRController(BaseController):
         """Re-compute LQR gain for a new (randomised) plant - call after reset."""
         self._compute_gain(params)
 
+    def set_sample_time(self, dt: float):
+        """Sync controller dt with env.dt (called by run_episode); redesigns
+        the discrete gain since it depends on dt."""
+        self.dt = float(dt)
+
     def compute(self, obs: np.ndarray) -> float:
         omega   = float(obs[1])
         current = float(obs[2])
-        x = np.array([[omega   - self.target],
-                      [current - 0.0        ]])   # current reference = 0
-        u = -(self.K_lqr @ x).item()              # .item() -> scalar
+        x = np.array([[omega], [current]])
+        u = (-self.K_lqr @ x + self.Nbar * self.target).item()
         return float(np.clip(u, *self.output_limits))
 
     def set_target(self, target: float):
