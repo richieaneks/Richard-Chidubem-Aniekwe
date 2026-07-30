@@ -71,7 +71,7 @@ class DCMotorEnv(gym.Env):
         sol = solve_ivp(
             motor_dynamics, [0.0, self.dt], self.state,
             args=(V, self.load_torque, self.params),
-            dense_output=False)
+            dense_output=False, max_step=self.dt/10.0)
 
         self.state = sol.y[:, -1]
         omega, current = self.state

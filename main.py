@@ -47,6 +47,10 @@ def run_episode(env: DCMotorEnv, controller, max_steps: int = 500):
     if hasattr(controller, 'set_target'):
         controller.set_target(env.target)
 
+    # Sync controller sample time (if supported) with environment timestep
+    if hasattr(controller, 'set_sample_time'):
+        controller.set_sample_time(env.dt)
+
     # update LQR gain for the current randomised plant params
     if isinstance(controller, LQRController):
         controller.update_matrices(env.params)   # env.params = current episode params
@@ -129,13 +133,20 @@ if __name__ == "__main__":
     #    LQR receives nominal params for initialisation;
     #    gains are recomputed per-episode in run_episode()
     controllers = {
-        "PID"      : PIDController(Kp=2.0, Ki=5.0, Kd=0.005,
+        # Kp=2.0/Kd=0.005 saturated every step and sustained the plant's
+        # ~25 Hz, near-undamped (zeta~0.07) resonance rather than damping
+        # it - the D term especially, since differentiating a noisy/
+        # oscillatory error injects energy right back into that resonance.
+        # This gain set was swept against the discretized plant model and
+        # stays stable across the full domain-randomization range in
+        # DCMotorEnv._domain_randomization().
+        "PID"      : PIDController(Kp=0.1, Ki=1.5, Kd=0.0,
                                    output_limits=(-12.0, 12.0)),
         "LQR"      : LQRController(NOMINAL_PARAMS,
                                    Q=np.diag([100.0, 1.0]),
                                    R_lqr=[[0.1]],
                                    output_limits=(-12.0, 12.0)),
-        "BangBang" : BangBangController(high=12.0, low=0.0),
+        # "BangBang" : BangBangController(high=12.0, low=0.0),
     }
 
     # Benchmark
