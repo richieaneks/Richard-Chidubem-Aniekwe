@@ -32,26 +32,38 @@ class PIDController(BaseController):
          (measurement - setpoint) = -error  ->  correct sign.
     """
     def __init__(self, Kp, Ki, Kd, setpoint=0.0,
-                 output_limits=(-12.0, 12.0)):
+                 output_limits=(-12.0, 12.0), sample_time=None):
         self._Kp = Kp; self._Ki = Ki; self._Kd = Kd
         self._output_limits = output_limits
+        self._sample_time = sample_time
         self._build_pid()
 
     def _build_pid(self):
         # pass -error as measurement to simple_pid
         self.pid = PID(self._Kp, self._Ki, self._Kd,
                        setpoint=0.0,
-                       output_limits=self._output_limits)
+                       output_limits=self._output_limits,
+                       sample_time=self._sample_time)
 
     def compute(self, obs: np.ndarray) -> float:
         error = float(obs[0])          # error = target - omega  (from env)
-        return float(self.pid(-error)) # meas = -error  -> (meas - sp=0) ✓
+        # Pass the simulated dt explicitly - simple_pid defaults to wall-clock
+        # time.monotonic(), which is unrelated to env.dt and jitters wildly
+        # relative to it, corrupting the integral/derivative terms.
+        dt = self._sample_time
+        return float(self.pid(-error, dt=dt)) # meas = -error  -> (meas - sp=0) ✓
 
     def set_target(self, target: float):
         pass    # target is already embedded in obs[0] by the env
 
     def reset(self):
         self._build_pid()
+
+    def set_sample_time(self, dt: float):
+        """Set controller sample time (s). Useful to synchronise with env.dt."""
+        self._sample_time = float(dt)
+        if hasattr(self, 'pid') and self.pid is not None:
+            self.pid.sample_time = self._sample_time
 
 
 class LQRController(BaseController):
