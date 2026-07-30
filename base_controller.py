@@ -1,7 +1,45 @@
 from abc import ABC, abstractmethod
 import numpy as np
 from simple_pid import PID
+from scipy.optimize import minimize
 import control as ct
+
+
+def _motor_AB(params: dict):
+    """Physics-based continuous state-space: states = [omega, current]."""
+    J = params['J']; b = params['b']; K = params['K']
+    R = params['R']; L = params['L']
+    A = np.array([[-b/J,  K/J],
+                  [-K/L, -R/L]])
+    B = np.array([[0.0 ],
+                  [1.0/L]])
+    return A, B
+
+
+def _discretize(A, B, dt):
+    """Zero-order-hold discretization at sample time dt (control acts once
+    per dt, so gains/models designed on the continuous plant and applied via
+    ZOH can be unstable - see LQRController)."""
+    sysd = ct.c2d(ct.ss(A, B, np.eye(2), np.zeros((2, 1))), dt)
+    return sysd.A, sysd.B
+
+
+def _tracking_equilibrium(Ad, Bd):
+    """
+    Unit-reference equilibrium (x_ss, u_ss) solving x_ss = Ad x_ss + Bd u_ss,
+    omega_ss = 1. Holding a nonzero speed against damping needs a nonzero
+    steady-state current, not 0 - scaling this by the actual target gives
+    the (state, input) the plant must sit at, used as feedforward so
+    state-feedback controllers have zero steady-state error.
+    """
+    C = np.array([[1.0, 0.0]])
+    n = Ad.shape[0]
+    M = np.block([[np.eye(n) - Ad, -Bd],
+                  [C, np.zeros((1, 1))]])
+    rhs = np.zeros((n + 1, 1)); rhs[-1, 0] = 1.0
+    x_ss, u_ss = np.split(np.linalg.solve(M, rhs), [n])
+    return x_ss, u_ss
+
 
 class BaseController(ABC):
     """Universal controller interface - all controllers implement compute()."""
@@ -91,42 +129,23 @@ class LQRController(BaseController):
         self.dt = float(dt)
         self._compute_gain(params)
 
-    @staticmethod
-    def _build_AB(params: dict):
-        """Physics-based state-space: states = [omega, current]."""
-        J = params['J']; b = params['b']; K = params['K']
-        R = params['R']; L = params['L']
-        A = np.array([[-b/J,  K/J],
-                      [-K/L, -R/L]])
-        B = np.array([[0.0 ],
-                      [1.0/L]])
-        return A, B
-
     def _compute_gain(self, params: dict):
-        A, B = self._build_AB(params)
+        A, B = _motor_AB(params)
         # The controller only actually acts once per env.dt (zero-order hold
         # at ~100 Hz), while this plant's electrical/mechanical resonance
         # sits at ~25 Hz (zeta ~0.07). A gain from continuous-time ct.lqr()
         # assumes continuous actuation and, applied via ZOH at this dt, is
         # unstable (closed-loop discrete pole magnitude >> 1). Design on the
         # dt-discretized plant instead so the gain matches how it's applied.
-        sysd = ct.c2d(ct.ss(A, B, np.eye(2), np.zeros((2, 1))), self.dt)
-        Ad, Bd = sysd.A, sysd.B
+        Ad, Bd = _discretize(A, B, self.dt)
         self.K_lqr, _, _ = ct.dlqr(Ad, Bd, self.Q, self.R_lqr)  # shape (1,2)
 
         # Reference feedforward (Nbar): driving x -> [target, 0] has no
         # reason to settle at omega=target, since [target, 0] generally
-        # isn't an equilibrium of the plant - holding a nonzero speed
-        # against damping needs a nonzero steady-state current, not 0.
-        # Solve for the true (x_ss, u_ss) that makes omega_ss = target and
-        # feed forward through Nbar so the regulator has zero steady-state
-        # error instead of quietly settling wherever K happens to point.
-        C = np.array([[1.0, 0.0]])
-        n = Ad.shape[0]
-        M = np.block([[np.eye(n) - Ad, -Bd],
-                      [C, np.zeros((1, 1))]])
-        rhs = np.zeros((n + 1, 1)); rhs[-1, 0] = 1.0
-        x_ss, u_ss = np.split(np.linalg.solve(M, rhs), [n])
+        # isn't an equilibrium of the plant. Feed forward through Nbar so
+        # the regulator has zero steady-state error instead of quietly
+        # settling wherever K happens to point.
+        x_ss, u_ss = _tracking_equilibrium(Ad, Bd)
         self.Nbar = float((self.K_lqr @ x_ss + u_ss).item())
 
     def update_matrices(self, params: dict):
@@ -134,8 +153,9 @@ class LQRController(BaseController):
         self._compute_gain(params)
 
     def set_sample_time(self, dt: float):
-        """Sync controller dt with env.dt (called by run_episode); redesigns
-        the discrete gain since it depends on dt."""
+        """Sync controller dt with env.dt (called by run_episode). Only
+        takes effect on the next update_matrices() call, since the gain
+        depends on dt - run_episode calls this before update_matrices()."""
         self.dt = float(dt)
 
     def compute(self, obs: np.ndarray) -> float:
@@ -150,6 +170,101 @@ class LQRController(BaseController):
 
     def reset(self):
         pass
+
+
+class MPCController(BaseController):
+    """
+    Linear MPC speed controller.
+    obs = [error, omega, current]
+
+    Like LQRController, re-derives the discrete plant model each episode
+    (via update_matrices) so it always matches the current randomised
+    plant. Unlike LQR/PID, the actuator limits are enforced *inside* the
+    optimization over a receding horizon rather than clipped after the
+    fact, which is what lets it settle with almost no overshoot even
+    though this plant is a near-undamped resonance (zeta ~0.07) that
+    saturates the actuator from a cold start.
+
+    Each step solves:
+        min_{u_0..u_{N-1}}  sum_k (x_k - x_ref)' Q (x_k - x_ref) + R u_k^2
+        s.t. x_{k+1} = Ad x_k + Bd u_k,   u_k in output_limits
+    as a small dense QP (state has no constraints, so this reduces to a
+    box-constrained QP - solved with scipy instead of pulling in a QP
+    library like cvxpy), applies u_0, and re-solves next step (receding
+    horizon).
+    """
+    def __init__(self, params: dict, Q, R_mpc, horizon=15,
+                 output_limits=(-12.0, 12.0), dt=0.01):
+        self.Q = np.asarray(Q, dtype=float)
+        self.R_mpc = float(np.asarray(R_mpc).reshape(()))
+        self.horizon = int(horizon)
+        self.output_limits = output_limits
+        self.target = 0.0
+        self.dt = float(dt)
+        self._u_prev = None
+        self._build_model(params)
+
+    def _build_model(self, params: dict):
+        A, B = _motor_AB(params)
+        Ad, Bd = _discretize(A, B, self.dt)
+        self.Ad, self.Bd = Ad, Bd
+        self._x_ss_unit, _ = _tracking_equilibrium(Ad, Bd)  # per unit target
+
+        n, N = 2, self.horizon
+        # Prediction matrices: X = Sx.x0 + Su.U, stacking x_1..x_N and
+        # u_0..u_{N-1}. Built once per episode (params fixed within an
+        # episode), not per step - only compute() runs every step.
+        Sx = np.zeros((n * N, n))
+        Su = np.zeros((n * N, N))
+        for row in range(N):
+            Sx[row*n:(row+1)*n, :] = np.linalg.matrix_power(Ad, row + 1)
+            for col in range(row + 1):
+                Su[row*n:(row+1)*n, col:col+1] = np.linalg.matrix_power(Ad, row - col) @ Bd
+
+        Qbar = np.kron(np.eye(N), self.Q)
+        Rbar = np.eye(N) * self.R_mpc
+        self._Sx = Sx
+        self._QbarSu = Qbar @ Su            # reused each step to build f
+        self._H = 2.0 * (Su.T @ Qbar @ Su + Rbar)   # constant within an episode
+
+    def update_matrices(self, params: dict):
+        """Re-derive the discrete model/QP for a new (randomised) plant -
+        call after reset(), same contract as LQRController."""
+        self._build_model(params)
+
+    def set_sample_time(self, dt: float):
+        self.dt = float(dt)
+
+    def set_target(self, target: float):
+        self.target = float(target)
+
+    def compute(self, obs: np.ndarray) -> float:
+        omega, current = float(obs[1]), float(obs[2])
+        x0 = np.array([[omega], [current]])
+        x_ref = self._x_ss_unit * self.target
+        x_ref = np.tile(x_ref, (self.horizon, 1))
+
+        e0 = self._Sx @ x0 - x_ref
+        f = 2.0 * (self._QbarSu.T @ e0).flatten()
+
+        lo, hi = self.output_limits
+        u_init = self._u_prev if self._u_prev is not None \
+            else np.zeros(self.horizon)
+
+        def cost_and_grad(U):
+            return 0.5 * U @ self._H @ U + f @ U, self._H @ U + f
+
+        result = minimize(cost_and_grad, u_init, jac=True,
+                          method='L-BFGS-B', bounds=[(lo, hi)] * self.horizon)
+        U = result.x
+        # Warm-start next step from the tail of this step's plan (receding
+        # horizon: shift left, repeat the last predicted input).
+        self._u_prev = np.concatenate([U[1:], U[-1:]])
+        return float(np.clip(U[0], lo, hi))
+
+    def reset(self):
+        self._u_prev = None
+
 
 class BangBangController(BaseController):
     """On/off baseline - useful sanity check and imitation-learning lower bound."""

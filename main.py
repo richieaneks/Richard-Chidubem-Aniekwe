@@ -5,7 +5,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from dc_motor_env import motor_dynamics, DCMotorEnv, NOMINAL_PARAMS
-from base_controller import PIDController, LQRController, BangBangController
+from base_controller import PIDController, LQRController, MPCController, BangBangController
 import control as ct
 
 
@@ -51,8 +51,9 @@ def run_episode(env: DCMotorEnv, controller, max_steps: int = 500):
     if hasattr(controller, 'set_sample_time'):
         controller.set_sample_time(env.dt)
 
-    # update LQR gain for the current randomised plant params
-    if isinstance(controller, LQRController):
+    # re-derive model-based controllers (LQR, MPC) for the current
+    # randomised plant params
+    if hasattr(controller, 'update_matrices'):
         controller.update_matrices(env.params)   # env.params = current episode params
 
     log = dict(omega=[], actions=[], rewards=[])
@@ -146,6 +147,15 @@ if __name__ == "__main__":
                                    Q=np.diag([100.0, 1.0]),
                                    R_lqr=[[0.1]],
                                    output_limits=(-12.0, 12.0)),
+        "MPC"      : MPCController(NOMINAL_PARAMS,
+                                   Q=np.diag([100.0, 1.0]),
+                                   R_mpc=0.05, horizon=15,
+                                   output_limits=(-12.0, 12.0)),
+        # BangBang: a memoryless relay switching on raw error can't avoid
+        # pumping energy into this plant's ~25 Hz, near-undamped (zeta~0.07)
+        # resonance at only ~4 samples/cycle - confirmed unstable even with
+        # hysteresis, so left disabled as a known-bad baseline rather than
+        # redesigned into something else.
         # "BangBang" : BangBangController(high=12.0, low=0.0),
     }
 
