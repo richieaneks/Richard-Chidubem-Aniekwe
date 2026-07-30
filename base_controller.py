@@ -104,7 +104,30 @@ class LQRController(BaseController):
 
     def _compute_gain(self, params: dict):
         A, B = self._build_AB(params)
-        self.K_lqr, _, _ = ct.lqr(A, B, self.Q, self.R_lqr)  # shape (1,2)
+        # The controller only actually acts once per env.dt (zero-order hold
+        # at ~100 Hz), while this plant's electrical/mechanical resonance
+        # sits at ~25 Hz (zeta ~0.07). A gain from continuous-time ct.lqr()
+        # assumes continuous actuation and, applied via ZOH at this dt, is
+        # unstable (closed-loop discrete pole magnitude >> 1). Design on the
+        # dt-discretized plant instead so the gain matches how it's applied.
+        sysd = ct.c2d(ct.ss(A, B, np.eye(2), np.zeros((2, 1))), self.dt)
+        Ad, Bd = sysd.A, sysd.B
+        self.K_lqr, _, _ = ct.dlqr(Ad, Bd, self.Q, self.R_lqr)  # shape (1,2)
+
+        # Reference feedforward (Nbar): driving x -> [target, 0] has no
+        # reason to settle at omega=target, since [target, 0] generally
+        # isn't an equilibrium of the plant - holding a nonzero speed
+        # against damping needs a nonzero steady-state current, not 0.
+        # Solve for the true (x_ss, u_ss) that makes omega_ss = target and
+        # feed forward through Nbar so the regulator has zero steady-state
+        # error instead of quietly settling wherever K happens to point.
+        C = np.array([[1.0, 0.0]])
+        n = Ad.shape[0]
+        M = np.block([[np.eye(n) - Ad, -Bd],
+                      [C, np.zeros((1, 1))]])
+        rhs = np.zeros((n + 1, 1)); rhs[-1, 0] = 1.0
+        x_ss, u_ss = np.split(np.linalg.solve(M, rhs), [n])
+        self.Nbar = float((self.K_lqr @ x_ss + u_ss).item())
 
     def update_matrices(self, params: dict):
         """Re-compute LQR gain for a new (randomised) plant - call after reset."""
